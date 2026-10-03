@@ -407,8 +407,15 @@ double LotsFor(double dist, double riskMoney)
    double step      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double vmax      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(tickSize <= 0 || tickValue <= 0 || step <= 0) return 0;
-   double lossPerLot = dist / tickSize * tickValue;
+   if(step <= 0) return 0;
+   // Money lost by 1.0 lot over the stop distance, computed by the terminal itself
+   // (robust to any contract size / tick-value setup of the broker).
+   double px = SymbolInfoDouble(_Symbol, SYMBOL_BID), lossPerLot = 0, pl = 0;
+   if(px > 0 && OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, 1.0, px, px - dist, pl) && pl < 0)
+      lossPerLot = -pl;
+   else if(tickSize > 0 && tickValue > 0)
+      lossPerLot = dist / tickSize * tickValue;
+   if(lossPerLot <= 0) return 0;
    double lots = MathFloor(riskMoney / lossPerLot / step) * step;
    if(lots < vmin)
      {
@@ -416,7 +423,10 @@ double LotsFor(double dist, double riskMoney)
       if(lossPerLot * vmin > AccountInfoDouble(ACCOUNT_EQUITY) * InpMaxRiskPct / 100) return 0;
       lots = vmin;
      }
-   return NormalizeDouble(MathMin(lots, vmax), 2);
+   lots = NormalizeDouble(MathMin(lots, vmax), 2);
+   PrintFormat("OD_GoldV2_EA sizing: stop %.2f | loss per 1.0 lot %.2f | lots %.2f | risk %.2f (%.2f%% of equity)",
+               dist, lossPerLot, lots, lots * lossPerLot, 100 * lots * lossPerLot / AccountInfoDouble(ACCOUNT_EQUITY));
+   return lots;
   }
 
 //+------------------------------------------------------------------+
