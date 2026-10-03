@@ -251,6 +251,9 @@ What the data says:
 - **What to expect** (new defaults, 1% risk, Monte Carlo of the trade order): typical worst drawdown ~16%, bad case ~25%, losing streaks of 9 to 13 trades. About 7–9 trades a month, ~46% winners. Starting live at **0.5% risk** roughly halves those drawdowns.
 - Losing year in the sample: 2024 (PF 0.95). Profitable years: 2022 (part year), 2023, 2025, 2026 to date.
 
+**MT5 Strategy Tester confirmation** (EA `OD_GoldV2_EA`, MetaQuotes-Demo XAUUSD M15, 1-minute OHLC, 2022-07-01 → 2026-10-04, $10,000, 1% risk):
+433 trades (Python: 430) · **net +$9,679 (+97%)** · **profit factor 1.34** · win rate 46.7% · max drawdown 11.7% balance / 13.5% equity · longest losing streak 9 trades (−$1,120) · largest loss −$203 (≈1%). Note the flat stretch from Dec 2023 to Sep 2025 (~21 months without a new high).
+
 Reproduce: `python3 research/od_backtest.py <MT5 M15 export.csv>` (needs pandas + numpy).
 
 ---
