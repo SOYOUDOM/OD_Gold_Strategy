@@ -67,7 +67,7 @@ riskPct   = input.float(1.0, "Risk % per trade", minval = 0.01, step = 0.1, grou
 qtyStep   = input.float(0.0, "Quantity step (oz)", minval = 0, step = 1, group = G3,
      tooltip = "Applies in both presets.\n0 = fractional oz (v1 behaviour).\n1 = round DOWN to whole oz = 0.01-lot steps like MT5. A trade that rounds to 0 is skipped.")
 
-useBE      = input.bool(true, "Breakeven at", inline = "be", group = G4)
+useBE      = input.bool(false, "Breakeven at", inline = "be", group = G4)
 beR        = input.float(1.0, "R", minval = 0.1, step = 0.1, inline = "be", group = G4)
 beOff      = input.float(0.30, "Breakeven offset ($)", minval = 0, step = 0.05, group = G4,
      tooltip = "Once price has reached the BE level, the stop moves to entry ± this amount.\n0.30 ≈ round-trip cost, so a breakeven exit is ≈ $0 instead of a small loss.")
@@ -75,11 +75,11 @@ usePart    = input.bool(false, "Partial close", inline = "pc", group = G4)
 partPct    = input.float(50.0, "%", minval = 1, maxval = 99, step = 5, inline = "pc", group = G4)
 partR      = input.float(1.0, "at R", minval = 0.1, step = 0.1, inline = "pc", group = G4,
      tooltip = "Closes this % of the position with a limit order at this many R. The rest runs to the final target / stop.")
-useTrail   = input.bool(false, "ATR trailing stop", inline = "tr", group = G4)
-trailMult  = input.float(2.5, "× ATR", minval = 0.1, step = 0.1, inline = "tr", group = G4)
+useTrail   = input.bool(true, "ATR trailing stop", inline = "tr", group = G4)
+trailMult  = input.float(3.0, "× ATR", minval = 0.1, step = 0.1, inline = "tr", group = G4)
 trailStart = input.float(1.0, "Trailing starts at R", minval = 0, step = 0.1, group = G4,
      tooltip = "Trailing activates once price has moved this many R in favour (0 = from entry).\nOn each closed bar: stop = max(stop, close − ATR × multiple) for buys (mirror for sells). It never moves backwards.")
-trailNoTP  = input.bool(false, "Trailing: remove the fixed target", group = G4,
+trailNoTP  = input.bool(true, "Trailing: remove the fixed target", group = G4,
      tooltip = "On = no final TP, the trade exits only on the (trailing) stop. Off = keep the R:R target.")
 
 tz      = input.string("GMT+7", "Time zone of all time inputs", options = ["GMT+7", "GMT+0", "GMT+2", "GMT+3"], group = G5,
@@ -96,7 +96,7 @@ useEod  = input.bool(false, "", inline = "eod", group = G5)
 eodSess = input.session("0330-0500", "Flatten open trade", inline = "eod", group = G5,
      tooltip = "Closes any open trade at the first bar opening inside this window (before the daily rollover / swap at 17:00 New York = 04:00–05:00 GMT+7).")
 
-useAdx  = input.bool(true, "ADX ≥", inline = "adx", group = G6)
+useAdx  = input.bool(false, "ADX ≥", inline = "adx", group = G6)
 adxMin  = input.float(20.0, "", minval = 0, step = 1, inline = "adx", group = G6)
 adxLen  = input.int(14, "length", minval = 1, inline = "adx", group = G6,
      tooltip = "Wilder ADX (DI length = smoothing = this value). Low ADX = no trend = Supertrend whipsaws.")

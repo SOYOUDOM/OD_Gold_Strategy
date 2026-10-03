@@ -86,12 +86,12 @@ All of these are evaluated on the bar close and take effect from the next bar, t
 
 | Input | Default | What it does |
 |---|---|---|
-| Breakeven at R | on, 1.0 | Once price has reached 1R, the stop moves to entry ± offset. It never moves the stop backwards. |
+| Breakeven at R | off, 1.0 | Once price has reached 1R, the stop moves to entry ± offset. It never moves the stop backwards. |
 | Breakeven offset ($) | 0.30 | ≈ round-trip cost, so a breakeven exit comes out around $0 instead of a small loss. |
 | Partial close % at R | off, 50% at 1.0R | A limit order closes this % at TP1. The rest runs to the final target or stop. |
-| ATR trailing stop × ATR | off, 2.5 | On each closed bar: stop = max(stop, close − ATR × mult) for buys (mirrored for sells). |
+| ATR trailing stop × ATR | **on, 3.0** | On each closed bar: stop = max(stop, close − ATR × mult) for buys (mirrored for sells). |
 | Trailing starts at R | 1.0 | Trailing activates after this much favourable move. 0 = from entry. |
-| Trailing: remove the fixed target | off | On = no TP. The trade exits only on the trailing stop ("let winners run"). |
+| Trailing: remove the fixed target | **on** | On = no TP. The trade exits only on the trailing stop ("let winners run"). |
 
 ### 5 · Sessions (all times in the chosen time zone, default **GMT+7**)
 Windows are checked at the **entry time**, which is the open of the bar after the signal. A signal on the 13:45 bar fills at 14:00, so it is inside a window that starts at 14:00.
@@ -109,7 +109,7 @@ Windows are checked at the **entry time**, which is the open of the bar after th
 ### 6 · Chop filters
 | Input | Default | What it does |
 |---|---|---|
-| ADX ≥ / length | on, 20 / 14 | Trades only when ADX(14) ≥ 20. Supertrend whipsaws when there is no trend. |
+| ADX ≥ / length | off, 20 / 14 | Trades only when ADX(14) ≥ 20. Supertrend whipsaws when there is no trend. |
 | \|close − EMA\| ≥ × ATR | off, 0.5 | Skips signals while price hugs the 200 EMA. |
 
 ### 7 · Higher-timeframe trend
@@ -182,7 +182,7 @@ Paste this table back to me filled in, and I'll analyse it. Screenshots of *Perf
 | Run | Settings |
 |---|---|
 | R0 | Preset = **Baseline v1** |
-| R1 | Preset = Improved, with **every** toggle off: caps, BE, session, ADX, HTF, news off; max trades = 0, max losses = 0 (partial, trail, EMA-distance and flatten are off by default). **Must equal R0.** If it doesn't, tell me. |
+| R1 | Preset = Improved, with **every** toggle off: caps, trailing, session, HTF, news off; max trades = 0, max losses = 0 (BE, partial, ADX, EMA-distance and flatten are off by default). **Must equal R0.** If it doesn't, tell me. |
 
 **Add one feature at a time on top of R1** (turn it off again before the next run):
 | Run | Feature |
@@ -224,6 +224,32 @@ Paste this table back to me filled in, and I'll analyse it. Screenshots of *Perf
 - **Direction:** longs only vs shorts only. A big imbalance can simply reflect gold's trend in that period.
 - **Feed:** another broker's XAUUSD on TradingView. Same rules, roughly similar results.
 - **Indicator vs strategy:** labels in `OD_GoldSignals` should sit on the same bars as the strategy's entries. Small differences come from §7.
+
+---
+
+## 5.6 Research results (MT5 broker data, Jul 2022 – Oct 2026)
+
+`research/od_backtest.py` is a Python copy of the Pine logic, with the same rules and the same TradingView fill model. It was run on 100,356 M15 bars exported from MT5. The broker's server clock is New York time + 7h, and the script converts it to GMT+7. On Jul–Oct 2026 it reproduces 7 of the 11 trades in the TradingView test on the same dates and with the same outcomes. The rest differ because broker prices are not identical to OANDA's. The data files are **not** in the repo.
+
+Split: **in-sample (IS) Jul 2022 – Dec 2024** for all choices, then **out-of-sample (OOS) Jan 2025 – Oct 2026**, run once. Risk 1%, cost $0.30/oz round trip.
+
+| Configuration | IS | OOS | OOS, cost ×1.7 |
+|---|---|---|---|
+| v1 baseline | PF 0.76, −57%, 471 trades | PF 1.08, +18% | PF 1.06 |
+| v2 first defaults (fixed 2R target, BE, ADX) | PF 0.92, −6% | PF 1.40, +15%, 72 trades | PF 1.38 |
+| **v2 new defaults: trailing 3×ATR from 1R, no fixed target, no BE, no ADX** | **PF 1.21, +37%, 280 trades** | **PF 1.39, +37%, 150 trades** | **PF 1.37** |
+| same, longs only | PF 1.64, +64% | PF 1.41, +24% | PF 1.39 |
+
+What the data says:
+- **v1 has no edge** on 15m gold over these 4 years. The Jul–Oct 2026 TradingView result was a good stretch.
+- **The exit matters most.** A trailing stop with no fixed target beat the fixed 2R target in almost every setting tested: trail multiples 2.0–3.5, Supertrend factors 2.5–3.5, ADX on or off. Gold trends hard, and a 2R cap cuts off the big winners (top 3% of trades ≥ 4R, best 7.8R).
+- **HTF trend agreement** is the most useful filter. ADX, EMA distance, breakeven and partial close did not help.
+- **Shorts** lost money in-sample, during a strong bull market (gold +45% IS, +58% OOS). Longs-only looks best on paper, but it lost in the 2026 pullback, while both directions stayed positive. The default keeps both directions, so the system doesn't depend on gold only rising.
+- Trades last a median of 11 hours, and 10% last over 60 hours. Weekend holds were the best trades on average, so flattening at end of day hurt. Overnight swap is **not** modelled.
+- **What to expect** (new defaults, 1% risk, Monte Carlo of the trade order): typical worst drawdown ~16%, bad case ~25%, losing streaks of 9 to 13 trades. About 7–9 trades a month, ~46% winners. Starting live at **0.5% risk** roughly halves those drawdowns.
+- Losing year in the sample: 2024 (PF 0.95). Profitable years: 2022 (part year), 2023, 2025, 2026 to date.
+
+Reproduce: `python3 research/od_backtest.py <MT5 M15 export.csv>` (needs pandas + numpy).
 
 ---
 
