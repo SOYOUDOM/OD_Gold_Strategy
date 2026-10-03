@@ -20,6 +20,8 @@
 #include <Trade\Trade.mqh>
 
 //--- enums ------------------------------------------------------------
+enum ENUM_OD_MODE    { OD_MODE_ALERTS = 0, // Alerts only: bot tells you, YOU decide (no trades)
+                       OD_MODE_AUTO   = 1 }; // Auto trade: bot places the trades
 enum ENUM_OD_PRESET  { OD_IMPROVED = 0,   // Improved (use toggles)
                        OD_BASELINE = 1 }; // Baseline v1 (all v2 features off)
 enum ENUM_OD_SLMODE  { OD_SL_SUPERTREND = 0, OD_SL_ATR = 1 };
@@ -29,7 +31,8 @@ enum ENUM_OD_SERVER  { OD_SERVER_NY_ALIGNED = 0, // NY-aligned (GMT+2 winter / G
                        OD_SERVER_FIXED = 1 };    // Fixed GMT offset
 
 //--- inputs (same names / defaults as the Pine script) -----------------
-input group "0 · Preset"
+input group "0 · Mode & preset"
+input ENUM_OD_MODE    InpMode        = OD_MODE_ALERTS; // Mode (use Auto trade in the Strategy Tester)
 input ENUM_OD_PRESET  InpPreset      = OD_IMPROVED;    // Preset
 
 input group "1 · Test window (server time)"
@@ -138,6 +141,32 @@ ENUM_TIMEFRAMES gHtfTF = PERIOD_H1;
 int      gHtfLen = 200;
 long     gMagic  = 0;
 
+// Alerts-only mode: the bot follows a "virtual" trade so it can tell you when to move the stop or exit.
+bool     vOn = false, vLong = false;
+double   vRef = 0, vR = 0, vStop = 0, vTP = 0, vEntry = 0, vBest = 0;
+int      vTradesToday = 0, vLossesToday = 0, vCount = 0, vWins = 0;
+double   vSumR = 0;
+datetime vDay = 0;
+string   gvp = "";
+
+void VSave()
+  {
+   GlobalVariableSet(gvp + "on", vOn); GlobalVariableSet(gvp + "long", vLong);
+   GlobalVariableSet(gvp + "ref", vRef); GlobalVariableSet(gvp + "R", vR); GlobalVariableSet(gvp + "stop", vStop);
+   GlobalVariableSet(gvp + "tp", vTP); GlobalVariableSet(gvp + "entry", vEntry); GlobalVariableSet(gvp + "best", vBest);
+   GlobalVariableSet(gvp + "tt", vTradesToday); GlobalVariableSet(gvp + "lt", vLossesToday); GlobalVariableSet(gvp + "day", (double)vDay);
+   GlobalVariableSet(gvp + "cnt", vCount); GlobalVariableSet(gvp + "wins", vWins); GlobalVariableSet(gvp + "sumR", vSumR);
+  }
+
+double GV(const string k) { return GlobalVariableCheck(gvp + k) ? GlobalVariableGet(gvp + k) : 0; }
+
+void VLoad()
+  {
+   vOn = GV("on") != 0; vLong = GV("long") != 0; vRef = GV("ref"); vR = GV("R"); vStop = GV("stop");
+   vTP = GV("tp"); vEntry = GV("entry"); vBest = GV("best"); vTradesToday = (int)GV("tt"); vLossesToday = (int)GV("lt");
+   vDay = (datetime)GV("day"); vCount = (int)GV("cnt"); vWins = (int)GV("wins"); vSumR = GV("sumR");
+  }
+
 // effective switches (Baseline preset forces every v2 feature off)
 bool v2, mAtrSL, mCaps, mBE, mPart, mTrail, mNoTP, mSess, mEod, mAdx, mDist, mHtf, mLimits, mNews;
 
@@ -175,6 +204,8 @@ int OnInit()
       else if(_Period == PERIOD_H1)  { gHtfTF = PERIOD_H4; gHtfLen = 50;  }
      }
    gMagic  = InpMagic + PeriodSeconds(_Period) / 60;
+   gvp     = "ODG_" + _Symbol + "_" + IntegerToString(gMagic) + "_";
+   if(InpMode == OD_MODE_ALERTS && !MQLInfoInteger(MQL_TESTER)) VLoad();
 
    hEma    = iMA(_Symbol, _Period, InpEmaLen, 0, MODE_EMA, PRICE_CLOSE);
    hAdx    = iADXWilder(_Symbol, _Period, InpAdxLen);
@@ -457,6 +488,63 @@ void Panel(const string headline, const string what, const string facts)
   }
 
 //+------------------------------------------------------------------+
+//| Alerts-only mode: process one closed bar of the virtual trade.   |
+//| Same exit rules as the strategy. Returns true if still in trade. |
+//+------------------------------------------------------------------+
+void VClose(double px, const string why)
+  {
+   double R = (vLong ? px - vEntry : vEntry - px) / vR;
+   vOn = false; vCount++; vSumR += R;
+   if(R > 0) vWins++; else vLossesToday++;
+   VSave();
+   Notify(StringFormat("EXIT your %s gold (%s): %s at ~%.2f | result %+.1fR", vLong ? "BUY" : "SELL",
+                       TfName((ENUM_TIMEFRAMES)_Period), why, px, R));
+  }
+
+bool VirtualBar(const MqlRates &b, double c1, double atr1, bool eodNow, bool inNews, const string facts)
+  {
+   double dm = vLong ? 1 : -1;
+   bool highFirst = (b.high - b.open) <= (b.open - b.low);          // TradingView: open goes to the nearest extreme first
+   bool favFirst  = vLong == highFirst;
+   double fav = vLong ? b.high : b.low, adv = vLong ? b.low : b.high;
+   bool stopHit = (adv - vStop) * dm <= 0, tpHit = vTP > 0 && (fav - vTP) * dm >= 0;
+   if((b.open - vStop) * dm <= 0)            { VClose(b.open, "stop was hit (gap)");  return false; }
+   if(vTP > 0 && (b.open - vTP) * dm >= 0)   { VClose(b.open, "target reached");      return false; }
+   if(stopHit && (!favFirst || !tpHit))      { VClose(vStop, "your stop was hit");    return false; }
+   if(tpHit)                                 { VClose(vTP, "target reached");         return false; }
+
+   // still open → breakeven / trailing on the closed bar (identical to the strategy)
+   vBest = vBest == 0 ? fav : (vLong ? MathMax(vBest, b.high) : MathMin(vBest, b.low));
+   double moveR = (vLong ? vBest - vRef : vRef - vBest) / vR;
+   double ns = vStop;
+   if(mBE && moveR >= InpBeR)
+     {
+      double be = vLong ? vRef + InpBeOff : vRef - InpBeOff;
+      if(vLong ? be > ns : be < ns) ns = be;
+     }
+   if(mTrail && moveR >= InpTrailStart)
+     {
+      double tr = vLong ? c1 - InpTrailMult * atr1 : c1 + InpTrailMult * atr1;
+      if(vLong ? tr > ns : tr < ns) ns = tr;
+     }
+   ns = NormalizeDouble(ns, _Digits);
+   double now = vLong ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(ns != vStop)
+     {
+      if((now - ns) * dm <= 0) { VClose(now, "price is already past the new stop, close now"); return false; }
+      double lockedR = (vLong ? ns - vEntry : vEntry - ns) / vR;
+      vStop = ns; VSave();
+      Notify(StringFormat("MOVE STOP of your %s gold (%s) to %.2f | locks %+.1fR | keep the trade open",
+                          vLong ? "BUY" : "SELL", TfName((ENUM_TIMEFRAMES)_Period), ns, lockedR));
+     }
+   if(eodNow || (inNews && InpNewsFlat)) { VClose(now, eodNow ? "end of day, close now" : "big news coming, close now"); return false; }
+   Panel(StringFormat("FOLLOWING a %s signal (entry ~%.2f)", vLong ? "BUY" : "SELL", vEntry),
+         StringFormat("If you took it: keep your stop at %.2f. I will alert you to move it or exit.\nNow: %+.1fR", vStop,
+                      (vLong ? now - vEntry : vEntry - now) / vR), facts);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Main: everything runs once per new bar on the closed bar (shift 1) |
 //+------------------------------------------------------------------+
 void OnTick()
@@ -503,7 +591,14 @@ void OnTick()
 
    //--- plain-language facts for the panel and the alerts
    int tradesToday = 0, lossesToday = 0;
-   DailyCounts(iTime(_Symbol, PERIOD_D1, 0), tradesToday, lossesToday);
+   datetime d1 = iTime(_Symbol, PERIOD_D1, 0);
+   if(InpMode == OD_MODE_ALERTS)
+     {
+      if(d1 != vDay) { vDay = d1; vTradesToday = 0; vLossesToday = 0; VSave(); }
+      tradesToday = vTradesToday; lossesToday = vLossesToday;
+     }
+   else
+      DailyCounts(d1, tradesToday, lossesToday);
    bool   up      = c1 > ema;
    bool   htfUp   = htfC > 0 && htfE != EMPTY_VALUE && htfC > htfE;
    string sTrend  = up ? "UP (price above the 200 EMA)" : "DOWN (price below the 200 EMA)";
@@ -515,6 +610,15 @@ void OnTick()
                     "\nTrading hours: " + sSess + "\nNews: " + sNews +
                     StringFormat("\nToday: %d trades, %d losses (max %d / %d)", tradesToday, lossesToday, InpMaxTrades, InpMaxLosses) +
                     "\nYour time: " + TimeToString(loc, TIME_DATE | TIME_MINUTES);
+   if(InpMode == OD_MODE_ALERTS)
+      facts += StringFormat("\nAlert record: %d signals, %d winners, total %+.1fR", vCount, vWins, vSumR);
+
+   //--- alerts-only mode: follow the virtual trade on the bar that just closed
+   if(InpMode == OD_MODE_ALERTS && vOn)
+     {
+      if(VirtualBar(r[i1], c1, atr1, eodNow, inNews, facts)) return;      // still in the trade
+      tradesToday = vTradesToday; lossesToday = vLossesToday;              // trade ended: may signal again
+     }
 
    //--- open trade: management on the closed bar (BE / trailing), forced exits
    ulong tk[];
@@ -617,10 +721,28 @@ void OnTick()
 
    double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100;
    double lots = LotsFor(dist, riskMoney);
+   if(lots <= 0 && InpMode == OD_MODE_ALERTS)
+      lots = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);           // alert anyway; message shows the size
    if(lots <= 0)
      {
       Notify(StringFormat("OD Gold %s %s signal SKIPPED: stop $%.2f needs less than the minimum lot for %.2f%% risk",
                           _Symbol, lng ? "BUY" : "SELL", dist, InpRiskPct));
+      return;
+     }
+   string side = lng ? "BUY" : "SELL";
+   string why  = (lng ? "trend up" : "trend down") + (mHtf ? ", " + TfName(gHtfTF) + (lng ? " up" : " down") : "") +
+                 ", momentum just turned " + (lng ? "up" : "down") + (mSess ? ", busy hours" : "");
+   string exitPlan = tp > 0 ? "target " + DoubleToString(tp, 2)
+                     : (InpMode == OD_MODE_ALERTS ? "no target, I will tell you when to move the stop" : "trailing stop locks profit");
+
+   if(InpMode == OD_MODE_ALERTS)
+     {
+      vOn = true; vLong = lng; vRef = c1; vR = dist; vStop = sl; vTP = tp; vBest = 0;
+      vEntry = iOpen(_Symbol, _Period, 0); vTradesToday++; VSave();
+      string msg = StringFormat("%s gold now ~%.2f (%s) | Why: %s | Put STOP at %.2f | Size ~%.2f lot = %.1f%% risk | %s",
+                                side, vEntry, TfName((ENUM_TIMEFRAMES)_Period), why, sl, lots, InpRiskPct, exitPlan);
+      Notify(StringSubstr(msg, 0, 250));
+      Panel("SIGNAL: " + side + " now (you decide)", "Why: " + why + StringFormat("\nIf you take it: stop at %.2f, about %.2f lot (%.1f%% risk).\n", sl, lots, InpRiskPct) + exitPlan, facts);
       return;
      }
    string cmt = StringFormat("OD|%s|%.3f|%.3f", lng ? "L" : "S", c1, dist);
@@ -637,10 +759,6 @@ void OnTick()
    else
       ok = lng ? trade.Buy(lots, _Symbol, 0, sl, tp, cmt) : trade.Sell(lots, _Symbol, 0, sl, tp, cmt);
 
-   string side = lng ? "BUY" : "SELL";
-   string why  = (lng ? "trend up" : "trend down") + (mHtf ? ", " + TfName(gHtfTF) + (lng ? " up" : " down") : "") +
-                 ", momentum just turned " + (lng ? "up" : "down") + (mSess ? ", busy hours" : "");
-   string exitPlan = tp > 0 ? "target " + DoubleToString(tp, 2) : "trailing stop locks profit";
    string msg  = StringFormat("%s gold %s @%.2f | Why: %s | Stop %.2f (risk %.1f%%) | Exit: %s | %.2f lot%s",
                               side, TfName((ENUM_TIMEFRAMES)_Period), c1, why, sl, InpRiskPct, exitPlan, lots,
                               ok ? "" : " | ORDER FAILED " + IntegerToString(trade.ResultRetcode()));

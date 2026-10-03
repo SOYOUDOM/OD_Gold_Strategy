@@ -357,6 +357,17 @@ The EA handles this by itself. **Auto HTF** picks the right trend filter for eac
 
 **Setup:** open three XAUUSD charts (M15, M30, H1), drag the same EA onto each, and keep the default inputs.
 
+## 6d. Alerts-only mode (default): the bot advises, you decide
+
+`Mode = Alerts only` (default) means the EA **never places trades**. It follows each signal as a "virtual" trade, using exactly the same rules, and sends these push messages:
+- **Signal:** `SELL gold now ~4174.42 (M15) | Why: trend down, H1 down, momentum just turned down, busy hours | Put STOP at 4228.24 | Size ~0.02 lot = 0.5% risk | no target, I will tell you when to move the stop`
+- **Move stop:** `MOVE STOP of your SELL gold (M15) to 4150.10 | locks +0.4R | keep the trade open`
+- **Exit:** `EXIT your SELL gold (M15): your stop was hit at ~4150.10 | result +0.4R` (or end of day / news / price already past the stop).
+
+If you take a trade, place the stop in your MT5 app right away, and move it whenever the bot says so. The chart panel keeps a running **alert record** (signals, winners, total R), so after a few weeks you can see whether the alerts would have made money. Virtual trades survive a restart of MT5 (they're saved in terminal global variables).
+
+The Strategy Tester needs `Mode = Auto trade`, because alerts-only mode places no orders to measure.
+
 ## 7. Known differences (TradingView ↔ MT5 ↔ indicator)
 - **Price feeds:** OANDA's TradingView prices and your MT5 broker's prices differ slightly. Levels won't match to the cent, and a borderline bar can flip.
 - **Intrabar order:** without Bar Magnifier, TradingView assumes price goes open → nearest extreme → other extreme. MT5 "real ticks" knows the true path. When the stop and target are both inside one bar, the results can differ.
