@@ -38,6 +38,14 @@ def load_mt5(path):
     return out.reset_index(drop=True)
 
 
+def resample(df, minutes):
+    """Build higher-timeframe bars (UTC-aligned, like OANDA/MT5) from M15 bars."""
+    g = df.set_index("t").resample(f"{minutes}min", label="left", closed="left")
+    out = pd.DataFrame({"open": g.open.first(), "high": g.high.max(), "low": g.low.min(),
+                        "close": g.close.last(), "day": g.day.first()}).dropna().reset_index()
+    return out
+
+
 # ─────────────────────────────────────────────────────────────── indicators
 def sma_seeded(x, n, alpha):
     """Pine-style recursive MA seeded with the SMA of the first n values."""
@@ -183,12 +191,13 @@ def in_win(m, w):
 
 # ─────────────────────────────────────────────────────────────── precompute
 class Market:
-    def __init__(self, df):
+    def __init__(self, df, tf_minutes=15):
         self.df = df
         self.o = df.open.to_numpy(); self.h = df.high.to_numpy()
         self.l = df.low.to_numpy(); self.c = df.close.to_numpy()
         self.t = df.t.to_numpy()
-        self.tclose = (df.t + pd.Timedelta(minutes=15))
+        self.tf = tf_minutes
+        self.tclose = (df.t + pd.Timedelta(minutes=tf_minutes))
         self.dayidx = df.day.to_numpy()
         self.newday = np.r_[True, self.dayidx[1:] != self.dayidx[:-1]]
         self.cache = {}

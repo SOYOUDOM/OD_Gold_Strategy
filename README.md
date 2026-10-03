@@ -330,6 +330,24 @@ st    = (dir == -1) ? up : dn       // dir -1 = up-trend (line below price)
 
 Compare its report with §5.6. Expect small differences from the Python/TradingView results, because the tester uses real ticks and real spread.
 
+## 6c. v2.1: run the same bot on 3 charts (M15 + M30 + H1)
+
+Research (`research/od_backtest.py`, `resample()`): the same rules on 30-minute and 1-hour bars catch different gold moves. The higher-timeframe trend keeps the same ~200-hour horizon on each chart: M15 uses H1 EMA 200, M30 uses H2 EMA 100, H1 uses H4 EMA 50. Running all three side by side, each with its own position, gives about twice as many trades and smoother results:
+
+| Setup (Jul 2022 – Oct 2026) | Trades | Return | Profit factor | Max drawdown |
+|---|---|---|---|---|
+| M15 only, 1% risk | 430 | +88% | 1.30 | 13.5% |
+| **M15 + M30 + H1, 0.5% each** | **807** | **+110%** | **1.37** | **13.6%** |
+| M15 + M30 + H1, 0.7% each | 807 | +179% | 1.37 | 18.6% |
+
+The three-chart setup was positive in-sample (2022–24: +96% at 1%) and out-of-sample (2025–26: +114% at 1%). At 0.7% risk, every calendar year was positive: 2022 (half year) +1.8%, 2023 +41.9%, 2024 +11.7%, 2025 +47.1%, 2026 to date +17.4%. Monte Carlo worst drawdown at 0.7%: median 13%, bad case 19%. Up to 3 trades can be open at once, one per chart.
+
+The EA handles this by itself. **Auto HTF** picks the right trend filter for each chart, and the magic number is base + chart minutes, so the three charts never touch each other's trades. Default risk is **0.5% per chart**.
+
+**Plain-language panel and alerts:** every bar the chart shows what the bot is doing and why. Examples: "WAIT: market is quiet now", "Uptrend. Waiting for momentum to turn UP again → then BUY", "HOLDING a BUY: do nothing". Every BUY/SELL push message lists the reasons, the stop and the exit plan.
+
+**Setup:** open three XAUUSD charts (M15, M30, H1), drag the same EA onto each, and keep the default inputs.
+
 ## 7. Known differences (TradingView ↔ MT5 ↔ indicator)
 - **Price feeds:** OANDA's TradingView prices and your MT5 broker's prices differ slightly. Levels won't match to the cent, and a borderline bar can flip.
 - **Intrabar order:** without Bar Magnifier, TradingView assumes price goes open → nearest extreme → other extreme. MT5 "real ticks" knows the true path. When the stop and target are both inside one bar, the results can differ.

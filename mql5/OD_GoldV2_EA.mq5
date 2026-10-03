@@ -53,7 +53,7 @@ input double          InpMinSL       = 1.0;    // Min stop distance (0 = off)
 input double          InpMaxSL       = 5.0;    // Max stop distance (0 = off)
 input ENUM_OD_MAXACT  InpMaxAct      = OD_MAX_SKIP; // If stop > max
 input double          InpRR          = 2.0;    // Risk : Reward (fixed target)
-input double          InpRiskPct     = 1.0;    // Risk % of equity per trade
+input double          InpRiskPct     = 0.5;    // Risk % of equity per trade (0.5 per chart when running M15+M30+H1)
 input bool            InpSkipBelowMin= true;   // Skip trade if size < minimum lot (else use min lot)
 input double          InpMaxRiskPct  = 3.0;    // ...when using min lot: skip if real risk > this %
 
@@ -95,7 +95,8 @@ input double          InpDistAtr     = 0.5;    // k
 
 input group "8 · Higher-timeframe trend"
 input bool            InpUseHtf      = true;   // Require HTF trend agreement
-input ENUM_TIMEFRAMES InpHtfTF       = PERIOD_H1; // HTF
+input bool            InpHtfAuto     = true;   // Auto HTF from chart (M15→H1 200, M30→H2 100, H1→H4 50)
+input ENUM_TIMEFRAMES InpHtfTF       = PERIOD_H1; // HTF (if Auto is off)
 input int             InpHtfLen      = 200;    // HTF EMA length
 
 input group "9 · Daily limits"
@@ -123,7 +124,7 @@ input bool            InpUseE4       = false;  // Event 4 on
 input datetime        InpE4          = D'2026.01.01 00:00'; // Event 4 (local time)
 
 input group "11 · Execution & alerts"
-input long            InpMagic       = 260210; // Magic number
+input long            InpMagic       = 260210; // Magic number base (+ chart minutes, so M15/M30/H1 charts never mix)
 input int             InpDeviation   = 50;     // Max slippage (points)
 input bool            InpPush        = true;   // Push notifications to MT5 phone app
 input bool            InpPopup       = false;  // Pop-up alerts on the terminal
@@ -133,6 +134,9 @@ input int             InpCalcBars    = 1500;   // Bars used for Supertrend / ATR
 CTrade   trade;
 int      hEma = INVALID_HANDLE, hAdx = INVALID_HANDLE, hHtfEma = INVALID_HANDLE;
 datetime lastBar = 0;
+ENUM_TIMEFRAMES gHtfTF = PERIOD_H1;
+int      gHtfLen = 200;
+long     gMagic  = 0;
 
 // effective switches (Baseline preset forces every v2 feature off)
 bool v2, mAtrSL, mCaps, mBE, mPart, mTrail, mNoTP, mSess, mEod, mAdx, mDist, mHtf, mLimits, mNews;
@@ -163,20 +167,29 @@ int OnInit()
       mPart = false;
      }
 
+   gHtfTF  = InpHtfTF; gHtfLen = InpHtfLen;
+   if(InpHtfAuto)                                 // keep the same ~200-hour trend horizon on every chart
+     {
+      if(_Period == PERIOD_M15)      { gHtfTF = PERIOD_H1; gHtfLen = 200; }
+      else if(_Period == PERIOD_M30) { gHtfTF = PERIOD_H2; gHtfLen = 100; }
+      else if(_Period == PERIOD_H1)  { gHtfTF = PERIOD_H4; gHtfLen = 50;  }
+     }
+   gMagic  = InpMagic + PeriodSeconds(_Period) / 60;
+
    hEma    = iMA(_Symbol, _Period, InpEmaLen, 0, MODE_EMA, PRICE_CLOSE);
    hAdx    = iADXWilder(_Symbol, _Period, InpAdxLen);
-   hHtfEma = iMA(_Symbol, InpHtfTF, InpHtfLen, 0, MODE_EMA, PRICE_CLOSE);
+   hHtfEma = iMA(_Symbol, gHtfTF, gHtfLen, 0, MODE_EMA, PRICE_CLOSE);
    if(hEma == INVALID_HANDLE || hAdx == INVALID_HANDLE || hHtfEma == INVALID_HANDLE)
      {
       Print("OD_GoldV2_EA: indicator handle error ", GetLastError());
       return(INIT_FAILED);
      }
-   if(mHtf && PeriodSeconds(InpHtfTF) <= PeriodSeconds(_Period))
+   if(mHtf && PeriodSeconds(gHtfTF) <= PeriodSeconds(_Period))
      {
       Print("OD_GoldV2_EA: HTF must be higher than the chart timeframe.");
       return(INIT_PARAMETERS_INCORRECT);
      }
-   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetExpertMagicNumber(gMagic);
    trade.SetDeviationInPoints(InpDeviation);
    trade.SetTypeFillingBySymbol(_Symbol);
    return(INIT_SUCCEEDED);
@@ -184,6 +197,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   Comment("");
    if(hEma != INVALID_HANDLE)    IndicatorRelease(hEma);
    if(hAdx != INVALID_HANDLE)    IndicatorRelease(hAdx);
    if(hHtfEma != INVALID_HANDLE) IndicatorRelease(hHtfEma);
@@ -301,7 +315,7 @@ int MyPositions(ulong &tickets[])
      {
       ulong tk = PositionGetTicket(i);
       if(tk == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != gMagic) continue;
       int k = ArraySize(tickets); ArrayResize(tickets, k + 1); tickets[k] = tk;
      }
    return ArraySize(tickets);
@@ -354,7 +368,7 @@ void DailyCounts(datetime dayStart, int &tradesToday, int &lossesToday)
    for(int i = 0; i < deals; i++)
      {
       ulong d = HistoryDealGetTicket(i);
-      if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagic) continue;
+      if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != gMagic) continue;
       if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
       datetime t = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
       int k = ArraySize(posId); ArrayResize(posId, k + 1); ArrayResize(posKey, k + 1);
@@ -430,6 +444,19 @@ double LotsFor(double dist, double riskMoney)
   }
 
 //+------------------------------------------------------------------+
+//| Plain-language status panel on the chart                         |
+//+------------------------------------------------------------------+
+string TfName(ENUM_TIMEFRAMES tf) { string s = EnumToString(tf); return StringSubstr(s, 7); }
+
+void Panel(const string headline, const string what, const string facts)
+  {
+   Comment("OD Gold v2 bot  ·  ", _Symbol, " ", TfName((ENUM_TIMEFRAMES)_Period), "  ·  risk ", DoubleToString(InpRiskPct, 2), "% per trade\n",
+           "────────────────────────────────────────\n",
+           headline, "\n", what, "\n",
+           "────────────────────────────────────────\n", facts);
+  }
+
+//+------------------------------------------------------------------+
 //| Main: everything runs once per new bar on the closed bar (shift 1) |
 //+------------------------------------------------------------------+
 void OnTick()
@@ -452,7 +479,7 @@ void OnTick()
    double ema   = Buf(hEma, 0, 1);
    double adx   = Buf(hAdx, 0, 1);
    double htfE  = Buf(hHtfEma, 0, 1);
-   double htfC  = iClose(_Symbol, InpHtfTF, 1);
+   double htfC  = iClose(_Symbol, gHtfTF, 1);
    double c1    = r[i1].close;
    double atr1  = atr[i1];
    if(ema == EMPTY_VALUE || atr1 == EMPTY_VALUE || st[i1] == EMPTY_VALUE) return;
@@ -473,6 +500,21 @@ void OnTick()
                              NearEvent(loc, InpUseE3, InpE3) || NearEvent(loc, InpUseE4, InpE4));
    bool eodNow   = mEod && InWin(m, InpEodStart, InpEodEnd);
    bool inRange  = r[i1].time >= InpStart && r[i1].time < InpEnd;
+
+   //--- plain-language facts for the panel and the alerts
+   int tradesToday = 0, lossesToday = 0;
+   DailyCounts(iTime(_Symbol, PERIOD_D1, 0), tradesToday, lossesToday);
+   bool   up      = c1 > ema;
+   bool   htfUp   = htfC > 0 && htfE != EMPTY_VALUE && htfC > htfE;
+   string sTrend  = up ? "UP (price above the 200 EMA)" : "DOWN (price below the 200 EMA)";
+   string sHtf    = !mHtf ? "not used" : (htfUp ? "UP" : "DOWN") + " on " + TfName(gHtfTF);
+   string sMom    = dir[i1] < 0 ? "pushing UP (Supertrend green)" : "pushing DOWN (Supertrend red)";
+   string sSess   = !mSess ? "any time" : (inSess ? "OPEN (London / New York)" : "CLOSED (quiet hours)");
+   string sNews   = !mNews ? "not used" : (inNews ? "BLOCKED (big news time)" : "clear");
+   string facts   = "Trend: " + sTrend + "\nBig trend: " + sHtf + "\nMomentum: " + sMom +
+                    "\nTrading hours: " + sSess + "\nNews: " + sNews +
+                    StringFormat("\nToday: %d trades, %d losses (max %d / %d)", tradesToday, lossesToday, InpMaxTrades, InpMaxLosses) +
+                    "\nYour time: " + TimeToString(loc, TIME_DATE | TIME_MINUTES);
 
    //--- open trade: management on the closed bar (BE / trailing), forced exits
    ulong tk[];
@@ -517,14 +559,26 @@ void OnTick()
         }
       if(MyPositions(tk) > 0 && (eodNow || (inNews && InpNewsFlat)))
          CloseAll(eodNow ? "EOD flatten" : "news blackout");
+      if(MyPositions(tk) > 0 && PositionSelectByTicket(tk[0]))
+        {
+         bool L = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+         Panel(StringFormat("HOLDING a %s since %s", L ? "BUY" : "SELL", TimeToString((datetime)PositionGetInteger(POSITION_TIME), TIME_DATE | TIME_MINUTES)),
+               StringFormat("Do nothing. Stop is at %.2f and moves to lock in profit. Open P/L: %.2f",
+                            PositionGetDouble(POSITION_SL), PositionGetDouble(POSITION_PROFIT)), facts);
+        }
       return;                                             // one trade at a time
      }
 
    //--- new entries
-   int tradesToday = 0, lossesToday = 0;
-   DailyCounts(iTime(_Symbol, PERIOD_D1, 0), tradesToday, lossesToday);
    bool limitsOk = !mLimits || ((InpMaxTrades == 0 || tradesToday < InpMaxTrades) && (InpMaxLosses == 0 || lossesToday < InpMaxLosses));
-   if(!inRange || !inSess || inNews || eodNow || !limitsOk) return;
+   if(!inRange || !inSess || inNews || eodNow || !limitsOk)
+     {
+      string why = !inRange ? "Outside the test dates." : !inSess ? "Market is quiet now. The bot only trades London / New York hours."
+                   : inNews ? "Big news is due. The bot stays out to avoid wild spikes." : eodNow ? "End of day: no new trades."
+                   : "Daily limit reached (too many trades or 2 losses). Back tomorrow.";
+      Panel("WAIT - no trading right now", why, facts);
+      return;
+     }
 
    bool adxOk  = !mAdx  || (adx != EMPTY_VALUE && adx >= InpAdxMin);
    bool distOk = !mDist || MathAbs(c1 - ema) >= InpDistAtr * atr1;
@@ -532,7 +586,16 @@ void OnTick()
    bool htfS   = !mHtf  || (htfC > 0 && htfE != EMPTY_VALUE && htfC < htfE);
    bool longSetup  = InpLong  && stUp   && c1 > ema && htfL && adxOk && distOk;
    bool shortSetup = InpShort && stDown && c1 < ema && htfS && adxOk && distOk;
-   if(!longSetup && !shortSetup) return;
+   if(!longSetup && !shortSetup)
+     {
+      string why;
+      if(mHtf && up != htfUp)             why = "Trends disagree (" + (up ? "up" : "down") + " here, " + (htfUp ? "up" : "down") + " on " + TfName(gHtfTF) + "). No trade until they agree.";
+      else if(up)                         why = "Uptrend. Waiting for momentum to turn UP again -> then BUY.";
+      else                                why = "Downtrend. Waiting for momentum to turn DOWN again -> then SELL.";
+      if(!adxOk || !distOk)               why = "Market is choppy right now. Waiting.";
+      Panel("WAIT - no signal yet", why, facts);
+      return;
+     }
 
    bool   lng  = longSetup;
    double raw  = mAtrSL ? (lng ? c1 - InpSlAtrMult * atr1 : c1 + InpSlAtrMult * atr1) : st[i1];
@@ -574,9 +637,15 @@ void OnTick()
    else
       ok = lng ? trade.Buy(lots, _Symbol, 0, sl, tp, cmt) : trade.Sell(lots, _Symbol, 0, sl, tp, cmt);
 
-   Notify(StringFormat("OD Gold %s %s | Entry≈%.2f | SL %.2f (%.2f) | TP %s | %.2f lot%s",
-                       _Symbol, lng ? "BUY" : "SELL", c1, sl, dist,
-                       tp > 0 ? DoubleToString(tp, 2) : "trailing", lots, ok ? "" : " | ORDER FAILED " + IntegerToString(trade.ResultRetcode())));
+   string side = lng ? "BUY" : "SELL";
+   string why  = (lng ? "trend up" : "trend down") + (mHtf ? ", " + TfName(gHtfTF) + (lng ? " up" : " down") : "") +
+                 ", momentum just turned " + (lng ? "up" : "down") + (mSess ? ", busy hours" : "");
+   string exitPlan = tp > 0 ? "target " + DoubleToString(tp, 2) : "trailing stop locks profit";
+   string msg  = StringFormat("%s gold %s @%.2f | Why: %s | Stop %.2f (risk %.1f%%) | Exit: %s | %.2f lot%s",
+                              side, TfName((ENUM_TIMEFRAMES)_Period), c1, why, sl, InpRiskPct, exitPlan, lots,
+                              ok ? "" : " | ORDER FAILED " + IntegerToString(trade.ResultRetcode()));
+   Notify(StringSubstr(msg, 0, 250));                     // push messages are limited to 255 characters
+   Panel(side + " placed at " + DoubleToString(c1, 2), "Why: " + why + "\nStop " + DoubleToString(sl, 2) + " | Exit: " + exitPlan, facts);
   }
 
 //+------------------------------------------------------------------+
@@ -586,7 +655,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
   {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
    if(!HistoryDealSelect(trans.deal)) return;
-   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic || HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != gMagic || HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
    long e = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
    if(e != DEAL_ENTRY_OUT && e != DEAL_ENTRY_OUT_BY) return;
    double pl = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION)
