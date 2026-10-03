@@ -1,0 +1,539 @@
+//@version=6
+// =====================================================================================================
+//  OD Gold Signals v2  ·  XAUUSD (OANDA) · 15m · intraday
+// -----------------------------------------------------------------------------------------------------
+//  Indicator twin of OD_GoldStrategy.pine — SAME rules, SAME inputs (sections marked "SHARED" are
+//  copied 1:1 from the strategy). Draws BUY / SELL labels with Entry, SL, TP (+ TP1 when partial
+//  close is on), dashed level lines, exit markers, and provides alerts.
+//
+//  Why it contains a small position emulator (section 6):
+//    "one trade at a time" and the daily loss limit depend on how each trade ended, so the indicator
+//    replays every trade the way TradingView's Strategy Tester does: market entry at the next bar's
+//    open, stops / targets checked against the bar's high & low, breakeven / trailing updated on the
+//    bar close. Result: the indicator fires on the same bars the strategy trades.
+//
+//  No repainting: signals, labels and alerts are produced only on CONFIRMED bars, no lookahead,
+//  HTF value accepted only after the HTF bar closed.
+// =====================================================================================================
+indicator("OD Gold Signals v2", "OD Gold Sig", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// =====================================================================================================
+// 1. INPUTS                                                                                   (SHARED)
+// =====================================================================================================
+const string G0  = "0 · Preset"
+const string G1  = "1 · Backtest window"
+const string G2  = "2 · Core signal (v1)"
+const string G3  = "3 · Stop-loss, target & size"
+const string G4  = "4 · Trade management"
+const string G5  = "5 · Sessions (time zone below)"
+const string G6  = "6 · Chop filters"
+const string G7  = "7 · Higher-timeframe trend"
+const string G8  = "8 · Daily limits"
+const string G9  = "9 · News blackout"
+const string G10 = "10 · Display"
+
+preset = input.string("Improved", "Preset", options = ["Improved", "Baseline v1"], group = G0,
+     tooltip = "Baseline v1 = original rules only: every v2 feature below is ignored, whatever its toggle says.\nImproved = the v2 toggles below are used.\nFlip this for a one-click A/B against v1.")
+
+startT = input.time(timestamp("2020-01-01"), "Start", group = G1,
+     tooltip = "New entries are allowed from this date. Use Start/End to split in-sample vs out-of-sample.")
+endT   = input.time(timestamp("2099-12-31"), "End", group = G1,
+     tooltip = "No new entries from this date on (an open trade is still managed until it exits).")
+
+stLen    = input.int(10, "Supertrend ATR length", minval = 1, group = G2)
+stFac    = input.float(3.0, "Supertrend factor", minval = 0.1, step = 0.1, group = G2)
+emaLen   = input.int(200, "Trend EMA length", minval = 1, group = G2,
+     tooltip = "Buys only when the signal bar closes above this EMA, sells only below it.")
+useLong  = input.bool(true, "Allow buys", inline = "dir", group = G2)
+useShort = input.bool(true, "Allow sells", inline = "dir", group = G2)
+
+slMode    = input.string("Supertrend", "Stop-loss type", options = ["Supertrend", "ATR"], group = G3,
+     tooltip = "Supertrend = stop at the Supertrend line of the signal bar (v1).\nATR = stop at entry ∓ (ATR × multiple).")
+atrLen    = input.int(14, "ATR length (ATR stop, caps, trail, filters)", minval = 1, group = G3)
+slAtrMult = input.float(2.0, "ATR stop multiple", minval = 0.1, step = 0.1, group = G3)
+useCaps   = input.bool(true, "Use min / max stop distance", group = G3,
+     tooltip = "Applies to both stop types. Distance = |entry − stop|.")
+capUnit   = input.string("ATR", "Cap units", options = ["ATR", "Price ($)"], group = G3,
+     tooltip = "ATR = multiples of ATR (adapts to volatility, more robust across years).\nPrice ($) = fixed dollar distance per oz.")
+minSL     = input.float(1.0, "Min stop distance", minval = 0, step = 0.1, group = G3,
+     tooltip = "A stop closer than this is WIDENED to it (avoids noise stops and oversized positions). 0 = off.")
+maxSL     = input.float(5.0, "Max stop distance", minval = 0, step = 0.1, group = G3,
+     tooltip = "A stop farther than this is handled by the rule below (spike bars, news candles). 0 = off.")
+maxAct    = input.string("Skip trade", "If stop > max", options = ["Skip trade", "Clamp to max"], group = G3)
+rr        = input.float(2.0, "Risk : Reward", minval = 0.1, step = 0.1, group = G3,
+     tooltip = "Final target = entry ± stop distance × this value.")
+riskPct   = input.float(1.0, "Risk % per trade", minval = 0.01, step = 0.1, group = G3,
+     tooltip = "Position size = (equity × risk %) ÷ stop distance (oz).")
+qtyStep   = input.float(0.0, "Quantity step (oz)", minval = 0, step = 1, group = G3,
+     tooltip = "Applies in both presets.\n0 = fractional oz (v1 behaviour).\n1 = round DOWN to whole oz = 0.01-lot steps like MT5. A trade that rounds to 0 is skipped.")
+
+useBE      = input.bool(true, "Breakeven at", inline = "be", group = G4)
+beR        = input.float(1.0, "R", minval = 0.1, step = 0.1, inline = "be", group = G4)
+beOff      = input.float(0.30, "Breakeven offset ($)", minval = 0, step = 0.05, group = G4,
+     tooltip = "Once price has reached the BE level, the stop moves to entry ± this amount.\n0.30 ≈ round-trip cost, so a breakeven exit is ≈ $0 instead of a small loss.")
+usePart    = input.bool(false, "Partial close", inline = "pc", group = G4)
+partPct    = input.float(50.0, "%", minval = 1, maxval = 99, step = 5, inline = "pc", group = G4)
+partR      = input.float(1.0, "at R", minval = 0.1, step = 0.1, inline = "pc", group = G4,
+     tooltip = "Closes this % of the position with a limit order at this many R. The rest runs to the final target / stop.")
+useTrail   = input.bool(false, "ATR trailing stop", inline = "tr", group = G4)
+trailMult  = input.float(2.5, "× ATR", minval = 0.1, step = 0.1, inline = "tr", group = G4)
+trailStart = input.float(1.0, "Trailing starts at R", minval = 0, step = 0.1, group = G4,
+     tooltip = "Trailing activates once price has moved this many R in favour (0 = from entry).\nOn each closed bar: stop = max(stop, close − ATR × multiple) for buys (mirror for sells). It never moves backwards.")
+trailNoTP  = input.bool(false, "Trailing: remove the fixed target", group = G4,
+     tooltip = "On = no final TP, the trade exits only on the (trailing) stop. Off = keep the R:R target.")
+
+tz      = input.string("GMT+7", "Time zone of all time inputs", options = ["GMT+7", "GMT+0", "GMT+2", "GMT+3"], group = G5,
+     tooltip = "GMT+7 = Phnom Penh. Used by sessions, flatten time and news windows.\nWindows are checked at the ENTRY time = open of the bar after the signal.")
+useSess = input.bool(true, "Trade only inside these windows", group = G5,
+     tooltip = "Skips the Asian session. Note: GMT+7 has no DST, but London/New York do, so the real session opens 1 h later in their winter.")
+useLon  = input.bool(true, "", inline = "lon", group = G5)
+lonSess = input.session("1400-1800", "London", inline = "lon", group = G5,
+     tooltip = "14:00–18:00 GMT+7 = 07:00–11:00 UTC (London morning).")
+useNY   = input.bool(true, "", inline = "ny", group = G5)
+nySess  = input.session("1930-2330", "New York", inline = "ny", group = G5,
+     tooltip = "19:30–23:30 GMT+7 = 12:30–16:30 UTC (US data + NY morning, London/NY overlap).")
+useEod  = input.bool(false, "", inline = "eod", group = G5)
+eodSess = input.session("0330-0500", "Flatten open trade", inline = "eod", group = G5,
+     tooltip = "Closes any open trade at the first bar opening inside this window (before the daily rollover / swap at 17:00 New York = 04:00–05:00 GMT+7).")
+
+useAdx  = input.bool(true, "ADX ≥", inline = "adx", group = G6)
+adxMin  = input.float(20.0, "", minval = 0, step = 1, inline = "adx", group = G6)
+adxLen  = input.int(14, "length", minval = 1, inline = "adx", group = G6,
+     tooltip = "Wilder ADX (DI length = smoothing = this value). Low ADX = no trend = Supertrend whipsaws.")
+useDist = input.bool(false, "|close − EMA| ≥", inline = "dist", group = G6)
+distAtr = input.float(0.5, "× ATR", minval = 0, step = 0.1, inline = "dist", group = G6,
+     tooltip = "Skips signals when price is hugging the trend EMA (classic chop zone).")
+
+useHtf = input.bool(true, "Require HTF trend agreement", group = G7,
+     tooltip = "Buy only if the last CLOSED HTF bar closed above its EMA; sell only if below.\nNon-repainting: request.security with lookahead OFF, value accepted only after the HTF bar closed.")
+htfTF  = input.timeframe("60", "HTF", group = G7)
+htfLen = input.int(200, "HTF EMA length", minval = 1, group = G7,
+     tooltip = "1H EMA 200 ≈ 8 trading days. (1H EMA 50 ≈ the 15m EMA 200, so it would add little.)")
+
+maxTrades = input.int(3, "Max trades per day (0 = off)", minval = 0, group = G8,
+     tooltip = "Counted when the entry order is sent. The day resets with the symbol's daily bar (OANDA: 17:00 New York).")
+maxLosses = input.int(2, "Stop after X losing trades per day (0 = off)", minval = 0, group = G8,
+     tooltip = "A loss = the whole trade (incl. any partial close) has negative net P/L after costs.")
+
+useNews  = input.bool(true, "Enable news blackout", group = G9,
+     tooltip = "No new entries when the entry time falls inside a window below.")
+newsFlat = input.bool(false, "Also close an open trade when a blackout starts", group = G9)
+useNfp   = input.bool(true, "", inline = "nfp", group = G9)
+nfpSess  = input.session("1900-2130", "NFP (1st Friday)", inline = "nfp", group = G9,
+     tooltip = "Applied on the first Friday of each month. 19:00–21:30 GMT+7 covers the 8:30 New York release in summer (19:30) and winter (20:30).")
+useDaily = input.bool(false, "", inline = "dly", group = G9)
+dlySess  = input.session("1915-2045", "Every Mon–Fri", inline = "dly", group = G9,
+     tooltip = "Blunt filter for ALL 8:30 New York data (CPI, PPI, retail sales, jobless claims…).")
+preMin   = input.int(30, "One-off events: block minutes before", minval = 0, group = G9)
+postMin  = input.int(60, "One-off events: block minutes after", minval = 0, group = G9,
+     tooltip = "Applied around each enabled event below (CPI, FOMC, …).")
+useE1 = input.bool(false, "", inline = "e1", group = G9)
+ev1   = input.time(timestamp("2026-01-01T00:00:00+07:00"), "Event 1", inline = "e1", group = G9,
+     tooltip = "The date/time picker uses your CHART time zone: set the chart to UTC+7 (Settings → Symbol → Time zone) and type local Phnom Penh times.")
+useE2 = input.bool(false, "", inline = "e2", group = G9)
+ev2   = input.time(timestamp("2026-01-01T00:00:00+07:00"), "Event 2", inline = "e2", group = G9)
+useE3 = input.bool(false, "", inline = "e3", group = G9)
+ev3   = input.time(timestamp("2026-01-01T00:00:00+07:00"), "Event 3", inline = "e3", group = G9)
+useE4 = input.bool(false, "", inline = "e4", group = G9)
+ev4   = input.time(timestamp("2026-01-01T00:00:00+07:00"), "Event 4", inline = "e4", group = G9)
+
+showPanel = input.bool(true, "Status panel", group = G10)
+showBlock = input.bool(true, "Shade blocked time (session = grey, news = orange)", group = G10,
+     tooltip = "A shaded bar = a signal on that bar would be blocked (its entry would fall in a blocked window).")
+
+// Effective switches: under "Baseline v1" every v2 feature is forced off.
+bool v2       = preset == "Improved"
+bool mAtrSL   = v2 and slMode == "ATR"
+bool mCaps    = v2 and useCaps
+bool mBE      = v2 and useBE
+bool mPart    = v2 and usePart
+bool mTrail   = v2 and useTrail
+bool mNoTP    = mTrail and trailNoTP
+bool mSess    = v2 and useSess
+bool mEod     = v2 and useEod
+bool mAdx     = v2 and useAdx
+bool mDist    = v2 and useDist
+bool mHtf     = v2 and useHtf
+bool mLimits  = v2
+bool mNews    = v2 and useNews
+
+// =====================================================================================================
+// 2. INDICATORS                                                                               (SHARED)
+// =====================================================================================================
+[st, dir]  = ta.supertrend(stFac, stLen)   // dir < 0 = up-trend (line below price), dir > 0 = down-trend
+ema        = ta.ema(close, emaLen)
+atr        = ta.atr(atrLen)                // Wilder ATR (RMA) — same smoothing Supertrend uses
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+
+bool stUp   = ta.change(dir) < 0           // flipped to up-trend on this closed bar   → buy trigger
+bool stDown = ta.change(dir) > 0           // flipped to down-trend on this closed bar → sell trigger
+
+// =====================================================================================================
+// 3. TIME HELPERS — sessions, news, daily reset                                               (SHARED)
+// =====================================================================================================
+// Entry time = close time of the signal bar = open of the bar where the market order fills.
+// (An EA running on a new bar sees exactly this time as "now".)
+int tEntry = time_close
+
+// Minutes after midnight of timestamp t in the chosen time zone.
+f_minOfDay(int t) =>
+    hour(t, tz) * 60 + minute(t, tz)
+
+// "HHMM-HHMM" → start (getEnd = false) or end (getEnd = true) in minutes after midnight.
+f_sessMin(string s, bool getEnd) =>
+    int off = getEnd ? 5 : 0
+    int(str.tonumber(str.substring(s, off, off + 2))) * 60 + int(str.tonumber(str.substring(s, off + 2, off + 4)))
+
+// Is timestamp t inside window s? Windows that cross midnight (e.g. "2200-0200") are supported.
+f_inWin(int t, string s) =>
+    int m = f_minOfDay(t)
+    int a = f_sessMin(s, false)
+    int b = f_sessMin(s, true)
+    a <= b ? (m >= a and m < b) : (m >= a or m < b)
+
+// Is timestamp t within [event − preMin, event + postMin)?
+f_nearEvent(int t, bool enabled, int ev) =>
+    enabled and t >= ev - preMin * 60000 and t < ev + postMin * 60000
+
+int  dowE      = dayofweek(tEntry, tz)
+bool firstFri  = dowE == dayofweek.friday and dayofmonth(tEntry, tz) <= 7   // NFP ≈ first Friday of the month
+bool monToFri  = dowE >= dayofweek.monday and dowE <= dayofweek.friday
+
+bool inSession = not mSess or (useLon and f_inWin(tEntry, lonSess)) or (useNY and f_inWin(tEntry, nySess))
+bool nfpBlock  = useNfp and firstFri and f_inWin(tEntry, nfpSess)
+bool dlyBlock  = useDaily and monToFri and f_inWin(tEntry, dlySess)
+bool evBlock   = f_nearEvent(tEntry, useE1, ev1) or f_nearEvent(tEntry, useE2, ev2) or f_nearEvent(tEntry, useE3, ev3) or f_nearEvent(tEntry, useE4, ev4)
+bool inNews    = mNews and (nfpBlock or dlyBlock or evBlock)
+bool eodNow    = mEod and f_inWin(tEntry, eodSess)
+bool inRange   = time >= startT and time < endT
+bool newDay    = timeframe.change("D")    // first bar of the symbol's trading day
+
+// =====================================================================================================
+// 4. HIGHER-TIMEFRAME TREND (non-repainting, lookahead OFF)                                   (SHARED)
+// =====================================================================================================
+// lookahead_off never returns future data, but while an HTF bar is still forming it returns its
+// *developing* value on realtime bars (historical bars would show the previous closed value → repaint).
+// Fix: only latch the HTF value on the chart bar that closes together with the HTF bar, i.e. when the
+// HTF bar is final. Between those bars the last CLOSED HTF value is held.
+// MQL5 equivalent at the open of the new bar: iClose(_Symbol, PERIOD_H1, 1) vs iMA(...PERIOD_H1..., shift 1).
+[htfC, htfE] = request.security(syminfo.tickerid, htfTF, [close, ta.ema(close, htfLen)], lookahead = barmerge.lookahead_off)
+var float htfClose = na
+var float htfEma   = na
+if time_close == time_close(htfTF)
+    htfClose := htfC
+    htfEma   := htfE
+if mHtf and barstate.isfirst and timeframe.in_seconds(htfTF) <= timeframe.in_seconds()
+    runtime.error("HTF must be higher than the chart timeframe.")
+bool htfBull = htfClose > htfEma
+bool htfBear = htfClose < htfEma
+
+// =====================================================================================================
+// 5. ENTRY FILTERS                                                                            (SHARED)
+// =====================================================================================================
+bool adxOk     = not mAdx  or adx >= adxMin
+bool distOk    = not mDist or math.abs(close - ema) >= distAtr * atr
+bool htfLongOk = not mHtf  or htfBull
+bool htfShrtOk = not mHtf  or htfBear
+
+bool longSetup  = useLong  and stUp   and close > ema and htfLongOk and adxOk and distOk
+bool shortSetup = useShort and stDown and close < ema and htfShrtOk and adxOk and distOk
+
+// Stop for a new trade → [stop price, distance (1R), ok]. Entry reference = signal-bar close.
+f_stop(bool lng) =>
+    float raw  = mAtrSL ? (lng ? close - slAtrMult * atr : close + slAtrMult * atr) : st
+    float dist = lng ? close - raw : raw - close
+    float capU = capUnit == "ATR" ? atr : 1.0
+    bool  ok   = dist > 0
+    if mCaps and ok
+        if minSL > 0 and dist < minSL * capU
+            dist := minSL * capU                          // widen a too-tight stop
+        if maxSL > 0 and dist > maxSL * capU
+            if maxAct == "Skip trade"
+                ok := false                               // stop too wide → no trade
+            else
+                dist := maxSL * capU                      // or tighten it to the cap
+    [lng ? close - dist : close + dist, dist, ok]
+
+// Round a quantity down to the step (0 = no rounding).
+f_round(float q) =>
+    qtyStep > 0 ? math.floor(q / qtyStep) * qtyStep : q
+
+// =====================================================================================================
+// 6. TRADE STATE + POSITION EMULATOR                                                 (indicator only)
+// =====================================================================================================
+const string G11 = "11 · Indicator only"
+acct       = input.float(1000.0, "Account balance for lot size ($)", minval = 1, group = G11,
+     tooltip = "Used to print the position size on each signal (and for the quantity-step check). The strategy uses its live equity instead.")
+costRT     = input.float(0.30, "Round-trip cost per oz ($)", minval = 0, step = 0.05, group = G11,
+     tooltip = "Spread + commission. Decides whether a finished trade counts as a loss for the daily limit.\nKeep it = 2 × the strategy's commission (2 × 0.15).")
+showLbl    = input.bool(true, "BUY / SELL labels", group = G11)
+showLvl    = input.bool(true, "Dashed Entry / SL / TP lines", group = G11)
+showExit   = input.bool(true, "Exit markers (TP / SL / BE / TS / EOD / News, result in R)", group = G11)
+useAlertFn = input.bool(true, "Send alert() with the full message", group = G11,
+     tooltip = "Used by an alert created with the condition 'Any alert() function call': ONE alert covers BUY and SELL, with exact prices in the text (saves alert slots on the free plan).")
+
+f_px(float x) =>
+    str.tostring(x, format.mintick)
+
+// Replays one bar of an open trade like TradingView's broker emulator (no bar magnifier):
+//   1) orders already crossed at the open fill at the open price,
+//   2) price then travels open → nearest extreme (high or low) → the other extreme.
+// rem = fraction of the original size still open, pl = realised P/L per oz of the original size.
+// Returns [rem, pl, TP1 filled this bar, exit tag, exit price].
+f_simBar(bool lng, float fill, float stp, string stpTag, bool t1On, float t1, float t1Frac, bool tpOn, float tp, float rem, float pl) =>
+    float  dm   = lng ? 1.0 : -1.0                   // (price − level) × dm > 0  ⇔  price is on the trade's favourable side
+    float  r    = rem
+    float  p    = pl
+    bool   hit1 = false
+    string tag  = ""
+    float  px   = na
+    float  fav  = lng ? high : low                   // best price of the bar for this trade
+    float  adv  = lng ? low : high                   // worst price of the bar for this trade
+    bool   favFirst = lng == (high - open <= open - low)
+    if (open - stp) * dm <= 0                        // gapped through the stop → filled at the open
+        p   += r * (open - fill) * dm
+        r   := 0.0
+        tag := stpTag
+        px  := open
+    else if tpOn and (open - tp) * dm >= 0           // gapped through the target → filled at the open
+        p   += r * (open - fill) * dm
+        r   := 0.0
+        tag := "TP"
+        px  := open
+    else
+        if t1On and (open - t1) * dm >= 0            // gapped through TP1 → partial at the open
+            p    += t1Frac * (open - fill) * dm
+            r    -= t1Frac
+            hit1 := true
+        bool stopHit = (adv - stp) * dm <= 0
+        if stopHit and not favFirst                  // adverse extreme comes first → stopped out
+            p   += r * (stp - fill) * dm
+            r   := 0.0
+            tag := stpTag
+            px  := stp
+        else
+            if t1On and not hit1 and (fav - t1) * dm >= 0
+                p    += t1Frac * (t1 - fill) * dm
+                r    -= t1Frac
+                hit1 := true
+            if tpOn and (fav - tp) * dm >= 0
+                p   += r * (tp - fill) * dm
+                r   := 0.0
+                tag := "TP"
+                px  := tp
+            if r > 0 and stopHit                     // favourable leg first, then back down to the stop
+                p   += r * (stp - fill) * dm
+                r   := 0.0
+                tag := stpTag
+                px  := stp
+    [r, p, hit1, tag, px]
+
+var int    tradesToday = 0
+var int    lossesToday = 0
+var bool   tradeOn    = false   // entry signalled and trade not finished yet (one trade at a time)
+var bool   pending    = false   // signal on the previous bar → market entry fills at this bar's open
+var bool   inPos      = false
+var bool   isLong     = false
+var float  entryRef   = na      // signal-bar close = reference price for every R level
+var float  fillPx     = na      // emulated fill = open of the bar after the signal
+var float  riskR      = na      // 1R = initial stop distance per oz
+var float  stopPx     = na      // current stop (moves with breakeven / trailing)
+var float  tp1Px      = na
+var float  tpPx       = na
+var float  bestPx     = na
+var bool   beDone     = false
+var bool   partOn     = false
+var bool   partDone   = false
+var float  partFrac   = 0.0     // fraction of the size closed at TP1
+var float  remFrac    = 0.0     // fraction of the size still open
+var float  realPL     = 0.0     // realised P/L per oz of the original size
+var string stopTag    = "SL"
+var bool   exitQueued = false   // EOD / news exit → market close at the next bar's open
+var string queuedTag  = ""
+var line   lnEntry    = na
+var line   lnSL       = na
+var line   lnTP       = na
+var line   lnTP1      = na
+
+bool sigBuy    = false
+bool sigSell   = false
+bool closedNow = false
+bool limitsOk  = not mLimits or ((maxTrades == 0 or tradesToday < maxTrades) and (maxLosses == 0 or lossesToday < maxLosses))
+
+// Everything below runs on CONFIRMED bars only (historical bars are always confirmed).
+if barstate.isconfirmed
+    if newDay
+        tradesToday := 0
+        lossesToday := 0
+
+    // 6a. Entry signalled on the previous bar fills at this bar's open.
+    if pending
+        pending := false
+        inPos   := true
+        fillPx  := open
+        remFrac := 1.0
+        realPL  := 0.0
+
+    string exitTag = ""
+    float  exitPx  = na
+
+    // 6b. Forced exit queued on the previous bar → closes at this bar's open.
+    if inPos and exitQueued
+        realPL  += remFrac * (isLong ? open - fillPx : fillPx - open)
+        remFrac := 0.0
+        exitTag := queuedTag
+        exitPx  := open
+    exitQueued := false
+
+    // 6c. Stop / TP1 / TP inside this bar.
+    if inPos and remFrac > 0
+        [r, p, hit1, tag, px] = f_simBar(isLong, fillPx, stopPx, stopTag, partOn and not partDone, tp1Px, partFrac, not mNoTP, tpPx, remFrac, realPL)
+        remFrac := r
+        realPL  := p
+        if hit1
+            partDone := true
+        if r <= 0
+            exitTag := tag
+            exitPx  := px
+
+    // 6d. Trade finished → daily loss count + exit marker.
+    if inPos and remFrac <= 0
+        float netPL = realPL - costRT                    // whole trade incl. partials, after costs
+        if netPL < 0
+            lossesToday += 1
+        inPos     := false
+        tradeOn   := false
+        closedNow := true
+        if showExit
+            label.new(bar_index, exitPx, exitTag + " " + (netPL >= 0 ? "+" : "") + str.tostring(netPL / riskR, "0.0") + "R",
+                 color = color.new(netPL >= 0 ? color.teal : color.maroon, 20), textcolor = color.white,
+                 style = label.style_label_left, size = size.tiny)
+
+    // Stretch the current trade's level lines up to this bar (they stop at the exit bar).
+    if showLvl and (tradeOn or closedNow)
+        if not na(lnEntry)
+            line.set_x2(lnEntry, bar_index)
+        if not na(lnSL)
+            line.set_x2(lnSL, bar_index)
+        if not na(lnTP)
+            line.set_x2(lnTP, bar_index)
+        if not na(lnTP1)
+            line.set_x2(lnTP1, bar_index)
+
+    // 6e. Trade management on the closed bar → new stop is active from the next bar (same as the strategy).
+    if inPos
+        bestPx := isLong ? (na(bestPx) ? high : math.max(bestPx, high)) : (na(bestPx) ? low : math.min(bestPx, low))
+        float moveR = (isLong ? bestPx - entryRef : entryRef - bestPx) / riskR
+
+        if mBE and not beDone and moveR >= beR
+            float bePx = isLong ? entryRef + beOff : entryRef - beOff
+            if isLong ? bePx > stopPx : bePx < stopPx
+                stopPx  := bePx
+                stopTag := "BE"
+            beDone := true
+
+        if mTrail and moveR >= trailStart
+            float trPx = isLong ? close - trailMult * atr : close + trailMult * atr
+            if isLong ? trPx > stopPx : trPx < stopPx
+                stopPx  := trPx
+                stopTag := "TS"
+
+    // 6f. Forced exits → market close at the next bar's open.
+    if inPos and (eodNow or (inNews and newsFlat))
+        exitQueued := true
+        queuedTag  := eodNow ? "EOD" : "News"
+
+    // =================================================================================================
+    // 7. NEW SIGNALS (same conditions as the strategy)
+    // =================================================================================================
+    limitsOk := not mLimits or ((maxTrades == 0 or tradesToday < maxTrades) and (maxLosses == 0 or lossesToday < maxLosses))
+    bool canTrade = inRange and not tradeOn and inSession and not inNews and not eodNow and limitsOk
+
+    if canTrade and (longSetup or shortSetup)
+        bool lng = longSetup
+        [slP, dist, ok] = f_stop(lng)
+        float qty = ok ? f_round(acct * riskPct / 100 / dist) : 0.0
+        if ok and qty > 0
+            float pQty = f_round(qty * partPct / 100)
+            isLong   := lng
+            entryRef := close
+            riskR    := dist
+            stopPx   := slP
+            tpPx     := lng ? close + dist * rr    : close - dist * rr
+            tp1Px    := lng ? close + dist * partR : close - dist * partR
+            partOn   := mPart and pQty > 0 and pQty < qty
+            partFrac := partOn ? pQty / qty : 0.0
+            partDone := false
+            beDone   := false
+            bestPx   := na
+            stopTag  := "SL"
+            pending  := true
+            tradeOn  := true
+            tradesToday += 1
+            sigBuy   := lng
+            sigSell  := not lng
+
+            // Label + alert text
+            float  lots = math.floor(qty) / 100              // MT5: 1 oz = 0.01 lot, rounded down to 0.01
+            string txt  = (lng ? "BUY" : "SELL") +
+                 "\nEntry ≈ " + f_px(close) +
+                 "\nSL " + f_px(slP) + "  (" + f_px(dist) + ")" +
+                 (partOn ? "\nTP1 " + f_px(tp1Px) + "  (" + str.tostring(partPct, "#") + "%)" : "") +
+                 "\nTP " + (mNoTP ? "none (trailing)" : f_px(tpPx) + "  (" + str.tostring(rr, "#.0#") + "R)") +
+                 "\n" + str.tostring(qty, "0.00") + " oz ≈ " + (lots >= 0.01 ? str.tostring(lots, "0.00") + " lot" : "< 0.01 lot")
+            if showLbl
+                label.new(bar_index, lng ? low : high, txt,
+                     color = lng ? color.new(color.green, 10) : color.new(color.red, 10), textcolor = color.white,
+                     style = lng ? label.style_label_up : label.style_label_down, size = size.small)
+            if showLvl
+                lnEntry := line.new(bar_index, close, bar_index + 1, close, color = color.gray, style = line.style_dashed)
+                lnSL    := line.new(bar_index, slP, bar_index + 1, slP, color = color.red, style = line.style_dashed)
+                lnTP    := na
+                lnTP1   := na
+                if not mNoTP
+                    lnTP := line.new(bar_index, tpPx, bar_index + 1, tpPx, color = color.lime, style = line.style_dashed)
+                if partOn
+                    lnTP1 := line.new(bar_index, tp1Px, bar_index + 1, tp1Px, color = color.teal, style = line.style_dotted)
+            if useAlertFn
+                alert("OD Gold " + syminfo.ticker + " " + str.replace_all(txt, "\n", " | "), alert.freq_once_per_bar_close)
+
+// =====================================================================================================
+// 8. ALERTS
+// =====================================================================================================
+// Values for alert placeholders (visible only in the Data Window).
+bool sigNow = sigBuy or sigSell
+plot(sigNow ? entryRef : na, "Alert entry", color.gray, display = display.data_window)
+plot(sigNow ? stopPx : na,   "Alert SL",    color.red,  display = display.data_window)
+plot(sigNow ? tpPx : na,     "Alert TP",    color.lime, display = display.data_window)
+plot(sigBuy ? 1 : sigSell ? -1 : na, "Alert side", color.white, display = display.data_window)
+
+alertcondition(sigBuy,  "OD Gold BUY",  'OD Gold BUY {{ticker}} | Entry≈{{plot("Alert entry")}} | SL {{plot("Alert SL")}} | TP {{plot("Alert TP")}}')
+alertcondition(sigSell, "OD Gold SELL", 'OD Gold SELL {{ticker}} | Entry≈{{plot("Alert entry")}} | SL {{plot("Alert SL")}} | TP {{plot("Alert TP")}}')
+alertcondition(sigNow,  "OD Gold BUY or SELL", 'OD Gold {{ticker}} side={{plot("Alert side")}} (1 = buy, -1 = sell) | Entry≈{{plot("Alert entry")}} | SL {{plot("Alert SL")}} | TP {{plot("Alert TP")}}')
+
+// =====================================================================================================
+// 9. PLOTS & PANEL
+// =====================================================================================================
+plot(ema, "Trend EMA", color.orange, 2)
+plot(dir < 0 ? st : na, "Supertrend up",   color.green, 2, plot.style_linebr)
+plot(dir > 0 ? st : na, "Supertrend down", color.red,   2, plot.style_linebr)
+plot(mHtf ? htfEma : na, "HTF EMA", color.purple, 1, plot.style_stepline)
+plot(inPos ? stopPx : na, "Active stop", color.new(color.red, 0), 1, plot.style_linebr)
+
+bgcolor(showBlock and mSess and not inSession ? color.new(color.gray, 92) : na, title = "Session blocked")
+bgcolor(showBlock and inNews ? color.new(color.orange, 80) : na, title = "News blocked")
+
+var table panel = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 25), border_width = 1)
+f_row(int r, string k, string v, color c) =>
+    table.cell(panel, 0, r, k, text_color = color.silver, text_halign = text.align_left, text_size = size.small)
+    table.cell(panel, 1, r, v, text_color = c, text_halign = text.align_left, text_size = size.small)
+
+if showPanel and barstate.islast
+    f_row(0, "OD Gold Sig v2", preset, color.white)
+    f_row(1, "Trend EMA", close > ema ? "Bull" : "Bear", close > ema ? color.lime : color.red)
+    f_row(2, "HTF " + htfTF, not mHtf ? "off" : htfBull ? "Bull" : htfBear ? "Bear" : "n/a", not mHtf ? color.gray : htfBull ? color.lime : color.red)
+    f_row(3, "ADX", str.tostring(adx, "#.0") + (mAdx ? (adxOk ? "  ok" : "  low") : "  (off)"), not mAdx ? color.gray : adxOk ? color.lime : color.orange)
+    f_row(4, "Session", not mSess ? "off" : inSession ? "open" : "closed", not mSess ? color.gray : inSession ? color.lime : color.orange)
+    f_row(5, "News", not mNews ? "off" : inNews ? "BLOCKED" : "clear", not mNews ? color.gray : inNews ? color.orange : color.lime)
+    f_row(6, "Today", str.tostring(tradesToday) + " trades · " + str.tostring(lossesToday) + " losses", limitsOk ? color.white : color.orange)
+    f_row(7, "Position", inPos ? (isLong ? "LONG" : "SHORT") + " · stop " + stopTag : pending ? "entry next bar" : "flat", not inPos ? color.gray : isLong ? color.lime : color.red)
