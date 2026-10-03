@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                    OD_Signal.mq5 |
+//|                                                    OD_GoldV2_EA.mq5 |
 //|  OD Gold v2 — MT5 port of OD_GoldStrategy.pine (XAUUSD, M15)     |
 //|                                                                  |
 //|  Same rules as the Pine strategy (see README.md):                |
@@ -156,10 +156,10 @@ int OnInit()
    mNews   = v2 && InpUseNews;
 
    if(_Period != PERIOD_M15)
-      Print("OD_Signal: designed and tested on M15 — current chart is ", EnumToString((ENUM_TIMEFRAMES)_Period));
+      Print("OD_GoldV2_EA: designed and tested on M15 — current chart is ", EnumToString((ENUM_TIMEFRAMES)_Period));
    if(mPart && (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
      {
-      Print("OD_Signal: partial close needs a HEDGING account — partial close disabled.");
+      Print("OD_GoldV2_EA: partial close needs a HEDGING account — partial close disabled.");
       mPart = false;
      }
 
@@ -168,12 +168,12 @@ int OnInit()
    hHtfEma = iMA(_Symbol, InpHtfTF, InpHtfLen, 0, MODE_EMA, PRICE_CLOSE);
    if(hEma == INVALID_HANDLE || hAdx == INVALID_HANDLE || hHtfEma == INVALID_HANDLE)
      {
-      Print("OD_Signal: indicator handle error ", GetLastError());
+      Print("OD_GoldV2_EA: indicator handle error ", GetLastError());
       return(INIT_FAILED);
      }
    if(mHtf && PeriodSeconds(InpHtfTF) <= PeriodSeconds(_Period))
      {
-      Print("OD_Signal: HTF must be higher than the chart timeframe.");
+      Print("OD_GoldV2_EA: HTF must be higher than the chart timeframe.");
       return(INIT_PARAMETERS_INCORRECT);
      }
    trade.SetExpertMagicNumber(InpMagic);
@@ -534,7 +534,7 @@ void OnTick()
       if(InpMinSL > 0 && dist < InpMinSL * unit) dist = InpMinSL * unit;
       if(InpMaxSL > 0 && dist > InpMaxSL * unit)
         {
-         if(InpMaxAct == OD_MAX_SKIP) { Print("OD_Signal: stop wider than max cap — trade skipped"); return; }
+         if(InpMaxAct == OD_MAX_SKIP) { Print("OD_GoldV2_EA: stop wider than max cap — trade skipped"); return; }
          dist = InpMaxSL * unit;
         }
      }

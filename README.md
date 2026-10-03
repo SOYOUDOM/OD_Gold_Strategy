@@ -6,7 +6,7 @@ This is a Pine Script v6 trend-following system for gold. It trades Supertrend f
 |---|---|---|
 | `OD_GoldStrategy.pine` | `strategy()` | Backtesting in TradingView's Strategy Tester |
 | `OD_GoldSignals.pine` | `indicator()` | Live charting: BUY/SELL labels with Entry/SL/TP, dashed level lines, exit markers, alerts |
-| `mql5/OD_Signal.mq5` | MT5 Expert Advisor | Same rules, automated trading + free phone push alerts (§6b) |
+| `mql5/OD_GoldV2_EA.mq5` | MT5 Expert Advisor | Same rules, automated trading + free phone push alerts (§6b) |
 | `research/od_backtest.py` | Python | Multi-year backtest replica used for §5.6 |
 
 Each file is a single script, so the two together fit the free plan's 2-indicators-per-chart limit. Both files use the same inputs and rules. The sections marked `(SHARED)` (inputs, indicators, time helpers, HTF trend, entry filters) are copied 1:1 between the files. **If you edit a shared section in one file, copy it to the other.**
@@ -299,9 +299,9 @@ st    = (dir == -1) ? up : dn       // dir -1 = up-trend (line below price)
 
 ---
 
-## 6b. MT5 Expert Advisor: `mql5/OD_Signal.mq5`
+## 6b. MT5 Expert Advisor: `mql5/OD_GoldV2_EA.mq5`
 
-`OD_Signal.mq5` ports the Pine strategy to MT5, with the same inputs, the same defaults and the same bar-close timing. It follows every porting note in §6:
+`OD_GoldV2_EA.mq5` ports the Pine strategy to MT5, with the same inputs, the same defaults and the same bar-close timing. It follows every porting note in §6:
 - Wilder ATR and Supertrend are computed in the EA itself (MT5's `iATR` uses a different average).
 - ADX uses `iADXWilder`. The HTF trend uses the last closed H1 bar.
 - Broker server time is converted to GMT+7 automatically on NY-aligned servers, which are GMT+2 in winter and GMT+3 in summer.
@@ -310,15 +310,15 @@ st    = (dir == -1) ? up : dn       // dir -1 = up-trend (line below price)
 - It sends **free push notifications** to the MT5 phone app.
 
 **Install (demo account first):**
-1. MT5 → *File → Open Data Folder* → `MQL5\Experts` → copy `OD_Signal.mq5` there.
-2. MT5 → *Tools → MetaQuotes Language Editor* (F4) → open `OD_Signal.mq5` → **Compile** (F7). It must show *0 errors*. Send a screenshot of any errors.
-3. In MT5's Navigator (Ctrl+N) → *Expert Advisors* → right-click → *Refresh*. Drag **OD_Signal** onto an **XAUUSD M15** chart.
+1. MT5 → *File → Open Data Folder* → `MQL5\Experts` → copy `OD_GoldV2_EA.mq5` there.
+2. MT5 → *Tools → MetaQuotes Language Editor* (F4) → open `OD_GoldV2_EA.mq5` → **Compile** (F7). It must show *0 errors*. Send a screenshot of any errors.
+3. In MT5's Navigator (Ctrl+N) → *Expert Advisors* → right-click → *Refresh*. Drag **OD_GoldV2_EA** onto an **XAUUSD M15** chart.
 4. In the EA window, tick **Allow Algo Trading**, then click the **Algo Trading** button on the toolbar so it turns green.
 5. Push alerts: install the MetaTrader 5 app on your phone. In the app, *Settings → Messages* shows your **MetaQuotes ID**. On the PC, go to *Tools → Options → Notifications*, tick *Enable Push Notifications*, enter the ID, and click *Test*.
 6. Account size: with 1% risk, typical 2026 stops (~$31/oz) need about **$3,000+** to reach MT5's 0.01-lot minimum. On a demo you can choose the balance. Set the demo to **$10,000** so the 1% sizing works. If a trade would need less than the minimum lot, the EA skips it and tells you, unless you turn off *Skip trade if size < minimum lot*.
 
 **Strategy Tester (MT5, free, years of data):** press *Ctrl+R*, then choose:
-- Expert: OD_Signal
+- Expert: OD_GoldV2_EA
 - Symbol: XAUUSD
 - Period: M15
 - Modelling: **Every tick based on real ticks**
