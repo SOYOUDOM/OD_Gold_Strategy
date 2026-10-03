@@ -344,6 +344,15 @@ The three-chart setup was positive in-sample (2022–24: +96% at 1%) and out-of-
 
 The EA handles this by itself. **Auto HTF** picks the right trend filter for each chart, and the magic number is base + chart minutes, so the three charts never touch each other's trades. Default risk is **0.5% per chart**.
 
+**MT5 Strategy Tester confirmation (v2.1, $10,000 each, 0.5% risk, 1-minute OHLC, 2022-07-01 → 2026-10-04):**
+
+| Chart | Net profit | Trades | Win % | Profit factor | Max balance drawdown |
+|---|---|---|---|---|---|
+| M15 | +$4,037 (+40%) | 432 | 46.3% | 1.36 | 5.4% |
+| M30 | +$3,101 (+31%) | 252 | 50.4% | 1.59 | 6.3% |
+| H1 | +$1,885 (+19%) | 110 | 55.5% | 1.89 | 2.2% |
+| All three (sum of the three runs, no compounding between them) | ≈ +$9,000 (+90%) | 794 | | | ≈ 10–14% (Python estimate) |
+
 **Plain-language panel and alerts:** every bar the chart shows what the bot is doing and why. Examples: "WAIT: market is quiet now", "Uptrend. Waiting for momentum to turn UP again → then BUY", "HOLDING a BUY: do nothing". Every BUY/SELL push message lists the reasons, the stop and the exit plan.
 
 **Setup:** open three XAUUSD charts (M15, M30, H1), drag the same EA onto each, and keep the default inputs.
